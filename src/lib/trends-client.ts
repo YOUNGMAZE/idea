@@ -112,7 +112,7 @@ function tokenizeTitle(title: string) {
 }
 
 function compactNumber(num: number) {
-  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(num);
+  return new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 }).format(num);
 }
 
 function getText(node: Element, selector: string) {
@@ -146,9 +146,9 @@ function toRsshubTag(niche: string) {
 }
 
 function sourceLabel(platform: Platform) {
-  if (platform === "youtube") return "YouTube Public Feed";
-  if (platform === "tiktok") return "TikTok Public RSS";
-  return "Instagram Public RSS";
+  if (platform === "youtube") return "Публичный фид YouTube";
+  if (platform === "tiktok") return "Публичный RSS TikTok";
+  return "Публичный RSS Instagram";
 }
 
 function buildProxyUrls(url: string) {
@@ -185,7 +185,7 @@ async function fetchTextFromPublicUrl(url: string) {
     }
   }
 
-  throw new Error(`Cannot fetch public source ${url}. Last error: ${lastError || "unknown"}`);
+  throw new Error(`Не удалось получить публичный источник ${url}. Последняя ошибка: ${lastError || "неизвестно"}`);
 }
 
 function unwrapProxyPayload(text: string) {
@@ -252,10 +252,10 @@ function parseFeedItems(xmlText: string) {
         id,
         title,
         url,
-        author: author || "Unknown creator",
-        published: published || "Recently",
+        author: author || "Неизвестный автор",
+        published: published || "Недавно",
         metric,
-        metricLabel: metric ? `${compactNumber(metric)} interactions` : "Fresh post",
+        metricLabel: metric ? `${compactNumber(metric)} взаимодействий` : "Свежая публикация",
       } satisfies FeedItem;
     })
     .filter((item): item is FeedItem => Boolean(item));
@@ -333,10 +333,10 @@ function parseJsonFeedItems(jsonText: string): FeedItem[] {
           id: item.guid?.trim() || item.id?.trim() || `${title}-${url}`,
           title,
           url,
-          author: item.author?.trim() || item.creator?.trim() || "Unknown creator",
-          published: item.pubDate?.trim() || item.published?.trim() || "Recently",
+          author: item.author?.trim() || item.creator?.trim() || "Неизвестный автор",
+          published: item.pubDate?.trim() || item.published?.trim() || "Недавно",
           metric,
-          metricLabel: metric ? `${compactNumber(metric)} interactions` : "Fresh post",
+          metricLabel: metric ? `${compactNumber(metric)} взаимодействий` : "Свежая публикация",
         } satisfies FeedItem;
       })
       .filter((item): item is FeedItem => Boolean(item));
@@ -364,13 +364,13 @@ async function fetchFromCandidateList(urls: string[]): Promise<FeedFetchResult> 
       if (items.length) {
         return { items, resolvedSource: url, errors };
       }
-      errors.push(`No feed entries parsed for ${url}`);
+      errors.push(`Не удалось распарсить записи фида для ${url}`);
     } catch (error) {
-      errors.push(error instanceof Error ? error.message : `Unknown error for ${url}`);
+      errors.push(error instanceof Error ? error.message : `Неизвестная ошибка для ${url}`);
     }
   }
 
-  throw new Error(errors[errors.length - 1] || "No public sources available");
+  throw new Error(errors[errors.length - 1] || "Нет доступных публичных источников");
 }
 
 function buildGoogleNewsRss(platform: Platform, niche: string) {
@@ -386,7 +386,7 @@ function buildGoogleNewsRss(platform: Platform, niche: string) {
 }
 
 function buildResilienceItems(platform: Platform, niche: string): FeedItem[] {
-  const baseNiche = (niche || "viral content").trim();
+  const baseNiche = (niche || "вирусный контент").trim();
   const platformTerms =
     platform === "youtube"
       ? ["shorts", "challenge", "reaction", "tutorial", "before after", "myth busting"]
@@ -395,7 +395,7 @@ function buildResilienceItems(platform: Platform, niche: string): FeedItem[] {
         : ["reel edit", "hook", "carousel to reel", "voiceover", "micro lesson", "b roll"];
 
   return platformTerms.map((term, index) => {
-    const title = `${baseNiche} ${term} idea ${index + 1}`;
+    const title = `${baseNiche} ${term} идея ${index + 1}`;
     const metric = seededValue(`${platform}-${baseNiche}`, index, 18_000, 320_000);
     const route =
       platform === "youtube"
@@ -408,10 +408,10 @@ function buildResilienceItems(platform: Platform, niche: string): FeedItem[] {
       id: `${platform}-${index}-${hashString(title)}`,
       title,
       url: route,
-      author: "Public trend aggregate",
+      author: "Публичная тренд-подборка",
       published: new Date(Date.now() - index * 1000 * 60 * 60 * 8).toISOString(),
       metric,
-      metricLabel: `${compactNumber(metric)} estimated interactions`,
+      metricLabel: `${compactNumber(metric)} оценка взаимодействий`,
     };
   });
 }
@@ -481,7 +481,7 @@ function buildTrendPayload(platform: Platform, source: string, feedItems: FeedIt
       return {
         term,
         score,
-        metricText: `${stat.mentions} mentions`,
+        metricText: `${stat.mentions} упоминаний`,
         source: sourceLabel(platform),
         url:
           platform === "youtube"
@@ -502,9 +502,9 @@ function buildTrendPayload(platform: Platform, source: string, feedItems: FeedIt
       title: item.title,
       channel: item.author,
       views,
-      viewsText: item.metric ? item.metricLabel : `${compactNumber(views)} est. interactions`,
+      viewsText: item.metric ? item.metricLabel : `${compactNumber(views)} оценка взаимодействий`,
       published: item.published,
-      duration: "Short",
+      duration: "Короткий формат",
       url: item.url,
     } satisfies TrendVideo;
   });
@@ -569,19 +569,19 @@ export async function fetchTrendsClient(platform: Platform, niche: string): Prom
       return {
         ...cached,
         fetchedAt: new Date().toISOString(),
-        source: [...cached.source, "Cache fallback"],
+        source: [...cached.source, "Кэш fallback"],
       };
     }
 
     const resilienceItems = buildResilienceItems(platform, niche);
-    const fallbackPayload = buildTrendPayload(platform, "Resilience fallback dataset", resilienceItems);
+    const fallbackPayload = buildTrendPayload(platform, "Резервный fallback-набор", resilienceItems);
     setCachedTrends(platform, niche, fallbackPayload);
 
     return {
       ...fallbackPayload,
       source: [
         ...fallbackPayload.source,
-        error instanceof Error ? `Fetch error: ${error.message}` : "Fetch error: unknown",
+        error instanceof Error ? `Ошибка загрузки: ${error.message}` : "Ошибка загрузки: неизвестно",
       ],
     };
   }
