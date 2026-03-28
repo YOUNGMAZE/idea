@@ -100,3 +100,4 @@ If you deploy under a subpath (for example `https://username.github.io/repo-name
 
 - Public sources can occasionally throttle or change markup. Fallback mirrors are included, but availability may vary.
 - Trend parsing is fully client-side, so no Node server is required for GitHub Pages.
+- If live feeds are unreachable, the app automatically falls back to cached data and then to a resilience dataset, so UI and idea generation stay available.

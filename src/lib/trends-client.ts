@@ -43,6 +43,14 @@ type FeedItem = {
   metricLabel: string;
 };
 
+type FeedFetchResult = {
+  items: FeedItem[];
+  resolvedSource: string;
+  errors: string[];
+};
+
+const CACHE_TTL_MS = 1000 * 60 * 30;
+
 const STOPWORDS = new Set([
   "the",
   "and",
@@ -148,6 +156,10 @@ function buildProxyUrls(url: string) {
   return [
     url,
     `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+    `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
+    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    `https://cors.isomorphic-git.org/${url}`,
     `https://r.jina.ai/http://${normalized}`,
   ];
 }
@@ -158,7 +170,10 @@ async function fetchTextFromPublicUrl(url: string) {
 
   for (const candidate of candidates) {
     try {
-      const response = await fetch(candidate);
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 12000);
+      const response = await fetch(candidate, { signal: controller.signal });
+      window.clearTimeout(timeout);
       if (!response.ok) {
         lastError = `${response.status} ${response.statusText}`;
         continue;
@@ -173,9 +188,42 @@ async function fetchTextFromPublicUrl(url: string) {
   throw new Error(`Cannot fetch public source ${url}. Last error: ${lastError || "unknown"}`);
 }
 
+function unwrapProxyPayload(text: string) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const data = JSON.parse(trimmed) as {
+        contents?: string;
+        data?: { contents?: string };
+      };
+      if (typeof data.contents === "string") return data.contents;
+      if (typeof data.data?.contents === "string") return data.data.contents;
+    } catch {
+      // Keep original text if JSON parsing fails.
+    }
+    return trimmed;
+  }
+
+  const rssStart = trimmed.indexOf("<rss");
+  const feedStart = trimmed.indexOf("<feed");
+  const start = rssStart >= 0 ? rssStart : feedStart;
+  if (start >= 0) {
+    const xmlPart = trimmed.slice(start);
+    const closeTag = xmlPart.includes("</rss>") ? "</rss>" : "</feed>";
+    const endIndex = xmlPart.lastIndexOf(closeTag);
+    if (endIndex >= 0) {
+      return xmlPart.slice(0, endIndex + closeTag.length);
+    }
+    return xmlPart;
+  }
+
+  return trimmed;
+}
+
 function parseFeedItems(xmlText: string) {
   const parser = new DOMParser();
   const xml = parser.parseFromString(xmlText, "text/xml");
+  if (xml.querySelector("parsererror")) return [];
   const entries = Array.from(xml.querySelectorAll("entry"));
   const items = Array.from(xml.querySelectorAll("item"));
   const nodes = entries.length ? entries : items;
@@ -183,13 +231,20 @@ function parseFeedItems(xmlText: string) {
   return nodes
     .map((node) => {
       const title = firstBySelectors(node, ["title"]);
-      const urlFromAtom = node.querySelector("link")?.getAttribute("href")?.trim() ?? "";
+      const linkElement = node.querySelector("link");
+      const urlFromAtom = linkElement?.getAttribute("href")?.trim() ?? "";
+      const urlFromAtomAlt =
+        Array.from(node.querySelectorAll("link"))
+          .find((link) => link.getAttribute("rel") === "alternate")
+          ?.getAttribute("href")
+          ?.trim() ?? "";
       const urlFromRss = firstBySelectors(node, ["link"]);
+      const enclosure = node.querySelector("enclosure")?.getAttribute("url")?.trim() ?? "";
       const description = firstBySelectors(node, ["description", "summary", "content"]);
       const author = firstBySelectors(node, ["author > name", "author", "dc\\:creator"]);
       const published = firstBySelectors(node, ["published", "pubDate", "updated"]);
       const id = firstBySelectors(node, ["id", "guid"]) || `${title}-${urlFromAtom || urlFromRss}`;
-      const url = urlFromAtom || urlFromRss;
+      const url = urlFromAtom || urlFromAtomAlt || urlFromRss || enclosure;
       const metric = extractMetric(`${title} ${description}`);
 
       if (!title || !url) return null;
@@ -206,23 +261,193 @@ function parseFeedItems(xmlText: string) {
     .filter((item): item is FeedItem => Boolean(item));
 }
 
-async function fetchFromCandidateList(urls: string[]) {
-  let lastError = "";
+function parseJsonFeedItems(jsonText: string): FeedItem[] {
+  try {
+    const data = JSON.parse(jsonText) as {
+      status?: string;
+      message?: string;
+      contents?: string;
+      items?: Array<{
+        title?: string;
+        link?: string;
+        guid?: string;
+        id?: string;
+        pubDate?: string;
+        published?: string;
+        author?: string;
+        creator?: string;
+        description?: string;
+        content?: string;
+      }>;
+      feed?: {
+        entries?: Array<{
+          title?: string;
+          link?: string;
+          id?: string;
+          published?: string;
+          author?: string;
+          content?: string;
+        }>;
+      };
+    };
+
+    if (typeof data.contents === "string") {
+      return parseFeedFromAnyText(data.contents);
+    }
+
+    if (data.status && data.status !== "ok" && !data.items?.length && !data.feed?.entries?.length) {
+      return [];
+    }
+
+    const items = [
+      ...(data.items || []),
+      ...((data.feed?.entries || []).map((entry) => ({
+        title: entry.title,
+        link: entry.link,
+        id: entry.id,
+        published: entry.published,
+        author: entry.author,
+        content: entry.content,
+      })) as Array<{
+        title?: string;
+        link?: string;
+        guid?: string;
+        id?: string;
+        pubDate?: string;
+        published?: string;
+        author?: string;
+        creator?: string;
+        description?: string;
+        content?: string;
+      }>),
+    ];
+
+    return items
+      .map((item) => {
+        const title = item.title?.trim() || "";
+        const url = item.link?.trim() || "";
+        if (!title || !url) return null;
+        const description = item.description || item.content || "";
+        const metric = extractMetric(`${title} ${description}`);
+        return {
+          id: item.guid?.trim() || item.id?.trim() || `${title}-${url}`,
+          title,
+          url,
+          author: item.author?.trim() || item.creator?.trim() || "Unknown creator",
+          published: item.pubDate?.trim() || item.published?.trim() || "Recently",
+          metric,
+          metricLabel: metric ? `${compactNumber(metric)} interactions` : "Fresh post",
+        } satisfies FeedItem;
+      })
+      .filter((item): item is FeedItem => Boolean(item));
+  } catch {
+    return [];
+  }
+}
+
+function parseFeedFromAnyText(rawText: string): FeedItem[] {
+  const normalized = unwrapProxyPayload(rawText);
+  if (!normalized) return [];
+  if (normalized.startsWith("{")) {
+    return parseJsonFeedItems(normalized);
+  }
+  return parseFeedItems(normalized);
+}
+
+async function fetchFromCandidateList(urls: string[]): Promise<FeedFetchResult> {
+  const errors: string[] = [];
 
   for (const url of urls) {
     try {
       const text = await fetchTextFromPublicUrl(url);
-      const items = parseFeedItems(text);
+      const items = parseFeedFromAnyText(text);
       if (items.length) {
-        return { items, resolvedSource: url };
+        return { items, resolvedSource: url, errors };
       }
-      lastError = `No feed entries parsed for ${url}`;
+      errors.push(`No feed entries parsed for ${url}`);
     } catch (error) {
-      lastError = error instanceof Error ? error.message : "Unknown error";
+      errors.push(error instanceof Error ? error.message : `Unknown error for ${url}`);
     }
   }
 
-  throw new Error(lastError || "No public sources available");
+  throw new Error(errors[errors.length - 1] || "No public sources available");
+}
+
+function buildGoogleNewsRss(platform: Platform, niche: string) {
+  const queryBase = (niche || "viral").trim();
+  const platformQuery =
+    platform === "youtube"
+      ? "site:youtube.com/shorts OR site:youtube.com/watch"
+      : platform === "tiktok"
+        ? "site:tiktok.com"
+        : "site:instagram.com/reel OR site:instagram.com/explore/tags";
+
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(`${queryBase} ${platformQuery}`)}&hl=en-US&gl=US&ceid=US:en`;
+}
+
+function buildResilienceItems(platform: Platform, niche: string): FeedItem[] {
+  const baseNiche = (niche || "viral content").trim();
+  const platformTerms =
+    platform === "youtube"
+      ? ["shorts", "challenge", "reaction", "tutorial", "before after", "myth busting"]
+      : platform === "tiktok"
+        ? ["trend sound", "transformation", "daily habit", "duet", "behind the scenes", "storytime"]
+        : ["reel edit", "hook", "carousel to reel", "voiceover", "micro lesson", "b roll"];
+
+  return platformTerms.map((term, index) => {
+    const title = `${baseNiche} ${term} idea ${index + 1}`;
+    const metric = seededValue(`${platform}-${baseNiche}`, index, 18_000, 320_000);
+    const route =
+      platform === "youtube"
+        ? `https://www.youtube.com/results?search_query=${encodeURIComponent(`${baseNiche} ${term}`)}`
+        : platform === "tiktok"
+          ? `https://www.tiktok.com/tag/${encodeURIComponent(baseNiche.split(" ")[0] || "viral")}`
+          : `https://www.instagram.com/explore/tags/${encodeURIComponent(baseNiche.split(" ")[0] || "viral")}/`;
+
+    return {
+      id: `${platform}-${index}-${hashString(title)}`,
+      title,
+      url: route,
+      author: "Public trend aggregate",
+      published: new Date(Date.now() - index * 1000 * 60 * 60 * 8).toISOString(),
+      metric,
+      metricLabel: `${compactNumber(metric)} estimated interactions`,
+    };
+  });
+}
+
+function cacheKey(platform: Platform, niche: string) {
+  return `trendstudio:cache:${platform}:${niche.toLowerCase().trim()}`;
+}
+
+export function getCachedTrends(platform: Platform, niche: string): TrendPayload | null {
+  try {
+    const raw = localStorage.getItem(cacheKey(platform, niche));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { expiresAt: number; data: TrendPayload };
+    if (!parsed?.data || typeof parsed.expiresAt !== "number") return null;
+    if (Date.now() > parsed.expiresAt) {
+      localStorage.removeItem(cacheKey(platform, niche));
+      return null;
+    }
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedTrends(platform: Platform, niche: string, data: TrendPayload) {
+  try {
+    localStorage.setItem(
+      cacheKey(platform, niche),
+      JSON.stringify({
+        expiresAt: Date.now() + CACHE_TTL_MS,
+        data,
+      })
+    );
+  } catch {
+    // Ignore storage quota errors and private mode restrictions.
+  }
 }
 
 function daysAgo(value: string) {
@@ -296,23 +521,68 @@ function buildTrendPayload(platform: Platform, source: string, feedItems: FeedIt
 export async function fetchTrendsClient(platform: Platform, niche: string): Promise<TrendPayload> {
   const encoded = encodeURIComponent((niche || "viral").trim());
   const rsshubTag = toRsshubTag(niche);
+  const youtubeFeedShorts = `https://www.youtube.com/feeds/videos.xml?search_query=${encoded}%20shorts`;
+  const youtubeFeedDefault = `https://www.youtube.com/feeds/videos.xml?search_query=${encoded}`;
+  const googleNewsFeed = buildGoogleNewsRss(platform, niche);
 
   const candidatesByPlatform: Record<Platform, string[]> = {
     youtube: [
-      `https://www.youtube.com/feeds/videos.xml?search_query=${encoded}%20shorts`,
-      `https://www.youtube.com/feeds/videos.xml?search_query=${encoded}`,
+      youtubeFeedShorts,
+      youtubeFeedDefault,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(youtubeFeedShorts)}`,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(youtubeFeedDefault)}`,
+      googleNewsFeed,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(googleNewsFeed)}`,
       "https://www.youtube.com/feeds/videos.xml?search_query=viral%20shorts",
+      "https://www.youtube.com/feeds/videos.xml?search_query=viral",
     ],
     tiktok: [
       `https://rsshub.app/tiktok/tag/${rsshubTag}`,
       `https://rsshub.app/tiktok/tag/viral`,
+      `https://rsshub.rssforever.com/tiktok/tag/${rsshubTag}`,
+      `https://rsshub.rssforever.com/tiktok/tag/viral`,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(`https://rsshub.app/tiktok/tag/${rsshubTag}`)}`,
+      "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Frsshub.app%2Ftiktok%2Ftag%2Fviral",
+      googleNewsFeed,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(googleNewsFeed)}`,
     ],
     instagram: [
       `https://rsshub.app/instagram/explore/tags/${rsshubTag}`,
       "https://rsshub.app/instagram/explore/tags/viral",
+      `https://rsshub.rssforever.com/instagram/explore/tags/${rsshubTag}`,
+      "https://rsshub.rssforever.com/instagram/explore/tags/viral",
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(`https://rsshub.app/instagram/explore/tags/${rsshubTag}`)}`,
+      "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Frsshub.app%2Finstagram%2Fexplore%2Ftags%2Fviral",
+      googleNewsFeed,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(googleNewsFeed)}`,
     ],
   };
 
-  const { items, resolvedSource } = await fetchFromCandidateList(candidatesByPlatform[platform]);
-  return buildTrendPayload(platform, resolvedSource, items);
+  try {
+    const { items, resolvedSource } = await fetchFromCandidateList(candidatesByPlatform[platform]);
+    const payload = buildTrendPayload(platform, resolvedSource, items);
+    setCachedTrends(platform, niche, payload);
+    return payload;
+  } catch (error) {
+    const cached = getCachedTrends(platform, niche);
+    if (cached) {
+      return {
+        ...cached,
+        fetchedAt: new Date().toISOString(),
+        source: [...cached.source, "Cache fallback"],
+      };
+    }
+
+    const resilienceItems = buildResilienceItems(platform, niche);
+    const fallbackPayload = buildTrendPayload(platform, "Resilience fallback dataset", resilienceItems);
+    setCachedTrends(platform, niche, fallbackPayload);
+
+    return {
+      ...fallbackPayload,
+      source: [
+        ...fallbackPayload.source,
+        error instanceof Error ? `Fetch error: ${error.message}` : "Fetch error: unknown",
+      ],
+    };
+  }
 }

@@ -13,12 +13,26 @@ import {
 } from "recharts";
 import { Download, LoaderCircle, Moon, Sparkles, Sun } from "lucide-react";
 import { generateIdeasFromTrends, type Idea } from "./lib/idea-generator";
-import { fetchTrendsClient, type Platform, type TrendPayload } from "./lib/trends-client";
+import { fetchTrendsClient, getCachedTrends, type Platform, type TrendPayload } from "./lib/trends-client";
 
 type Theme = "dark" | "light";
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function getSourceWarning(payload: TrendPayload) {
+  const joined = payload.source.join(" | ").toLowerCase();
+  if (joined.includes("resilience fallback")) {
+    return "Live public feeds are unavailable right now. Showing resilience fallback data so the dashboard stays operational.";
+  }
+  if (joined.includes("cache fallback")) {
+    return "Live public feeds are temporarily unavailable. Showing cached trend data.";
+  }
+  if (joined.includes("fetch error")) {
+    return "Some data sources were unstable during loading. Results are partially recovered from fallbacks.";
+  }
+  return "";
 }
 
 function exportAsJson(ideas: Idea[]) {
@@ -90,6 +104,7 @@ export default function App() {
   const [loadingTrends, setLoadingTrends] = useState(false);
   const [loadingIdeas, setLoadingIdeas] = useState(false);
   const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -108,12 +123,21 @@ export default function App() {
   async function loadTrends() {
     setLoadingTrends(true);
     setError("");
+    setWarning("");
     try {
       const data = await fetchTrendsClient(platform, niche);
       setTrends(data);
+      const sourceWarning = getSourceWarning(data);
+      if (sourceWarning) setWarning(sourceWarning);
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : "Unknown error";
-      setError(`Failed to load trends: ${message}`);
+      const cached = getCachedTrends(platform, niche);
+      if (cached) {
+        setTrends(cached);
+        setWarning(`Live sources are temporarily unavailable. Showing cached data from ${new Date(cached.fetchedAt).toLocaleString()}.`);
+      } else {
+        setError(`Failed to load trends: ${message}`);
+      }
     } finally {
       setLoadingTrends(false);
     }
@@ -127,6 +151,8 @@ export default function App() {
       if (!trends || trends.platform !== platform) {
         setTrends(sourceTrends);
       }
+      const sourceWarning = getSourceWarning(sourceTrends);
+      if (sourceWarning) setWarning(sourceWarning);
       const generated = generateIdeasFromTrends(sourceTrends, niche, 10);
       setIdeas(generated);
     } catch (requestError) {
@@ -139,7 +165,7 @@ export default function App() {
 
   useEffect(() => {
     void loadTrends();
-  }, []);
+  }, [platform]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 transition-colors duration-300 dark:bg-slate-950 dark:text-slate-100">
@@ -190,7 +216,7 @@ export default function App() {
           <select
             value={platform}
             onChange={(event) => setPlatform(event.target.value as Platform)}
-            className="rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-sm outline-none ring-violet-400 focus:ring-2 dark:border-slate-700"
+            className="rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-sm text-slate-900 outline-none ring-violet-400 focus:ring-2 dark:border-slate-700 dark:text-slate-100"
           >
             <option value="youtube">YouTube / Shorts</option>
             <option value="tiktok">TikTok</option>
@@ -200,14 +226,18 @@ export default function App() {
           <input
             value={niche}
             onChange={(event) => setNiche(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void loadTrends();
+            }}
             placeholder="Niche: travel, finance, fitness, gaming..."
-            className="rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-sm outline-none ring-violet-400 focus:ring-2 dark:border-slate-700"
+            className="rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-sm text-slate-900 outline-none ring-violet-400 focus:ring-2 dark:border-slate-700 dark:text-slate-100"
           />
 
           <motion.button
             whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.98 }}
             onClick={() => void loadTrends()}
+            disabled={loadingTrends}
             className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white transition hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
           >
             {loadingTrends ? <LoaderCircle className="animate-spin" size={16} /> : <Sparkles size={16} />}
@@ -218,6 +248,7 @@ export default function App() {
             whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.98 }}
             onClick={() => void generateIdeas()}
+            disabled={loadingIdeas || loadingTrends}
             className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-violet-500"
           >
             {loadingIdeas ? <LoaderCircle className="animate-spin" size={16} /> : <Sparkles size={16} />}
@@ -226,8 +257,21 @@ export default function App() {
         </motion.section>
 
         {error ? (
-          <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/80 dark:bg-red-950/40 dark:text-red-300">
-            {error}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/80 dark:bg-red-950/40 dark:text-red-300">
+            <p>{error}</p>
+            <button
+              type="button"
+              onClick={() => void loadTrends()}
+              className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium transition hover:bg-red-100 dark:border-red-700 dark:hover:bg-red-900/40"
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
+
+        {warning ? (
+          <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-300">
+            {warning}
           </p>
         ) : null}
 
@@ -239,7 +283,7 @@ export default function App() {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={topKeywords}>
                     <CartesianGrid vertical={false} strokeDasharray="3 3" strokeOpacity={0.25} />
-                    <XAxis dataKey="term" tick={{ fontSize: 12 }} />
+                    <XAxis dataKey="term" tick={{ fontSize: 12 }} interval={0} angle={-20} textAnchor="end" height={52} />
                     <YAxis tickFormatter={formatNumber} tick={{ fontSize: 12 }} />
                     <Tooltip
                       formatter={(value) => formatNumber(Number(value ?? 0))}
@@ -291,6 +335,11 @@ export default function App() {
                     </div>
                   </a>
                 ))}
+                {!topVideos.length ? (
+                  <p className="rounded-xl border border-dashed border-slate-300 p-3 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                    No trend posts loaded yet. Try another niche or click Analyze Trends again.
+                  </p>
+                ) : null}
               </div>
             </div>
           </div>
